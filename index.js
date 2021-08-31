@@ -11,46 +11,101 @@ const User = require("./model/User");
  
 const pool = require("./db");
 
+const moment=require('moment')
+
+var mqtt = require('mqtt');
+const { resolve } = require('path');
+var client  = mqtt.connect('mqtt://192.168.32.121')
 
 
-const WebSocket = require('ws');
 
-const wss = new WebSocket.Server({ port: 4000 },console.log("connect ws"));
-
-wss.on('connection', function connection(ws) {
-    ws.on('message', function incoming(message) {
-    console.log(/*'received: %s',*/ message);
-    pool.query(
-        "SELECT * FROM datatable WHERE daterecord = CURRENT_DATE"
-    ).then(response=>{console.log(response.rows[0].seriesnum)
-        seriesNo=response.rows[0].seriesnum
-        
-        var splitter=message.split("\n\r")
-              console.log(splitter)
-              var mSeries=parseInt(splitter[0].substr(2,9))
-              var dSeries=parseInt(splitter[1].substr(2,9))
-              var cSeries=parseInt(splitter[2].substr(2,9))
-              seriesNoNew=Math.max(mSeries,dSeries,cSeries)
-              if(!seriesNo)
-              console.log("asdsad")
-              additionals=Math.max(seriesNoNew-seriesNo,0)
-              
-              console.log("Series No:" + seriesNoNew)
-              console.log(additionals + " new\n\n")
-              if(additionals>0){
-                seriesNo=seriesNoNew
-                pool.query(
-                    `UPDATE datatable SET customer = customer + ${additionals}, seriesnum =${seriesNo} where daterecord = CURRENT_DATE`
-                );
-           
-                                }
+client.on('connect',function(){
+    console.log("connected MQTT");
+    client.subscribe("turnstile-sales-data");
+    client.subscribe("turnstile-alarm");
+})
+client.on('disconnect',function(){
+    console.log("disconnected MQTT");
+    client.unsubscribe("turnstile-sales-data");
+    client.unsubscribe("turnstile-alarm"); 
+})
+client.on('message',function(topic, message){
+    let messageee=message.toString()
+    console.log(topic)
+    console.log(messageee);
+    if(topic=="turnstile-sales-data")
+        {
+        let splitter=messageee.split("\n\r")
+        console.log(splitter)
+        let mSeries=parseInt(splitter[0].substr(2,9))
+        let dSeries=parseInt(splitter[1].substr(2,9))
+        let cSeries=parseInt(splitter[2].substr(2,9))
+        pool.query(`INSERT INTO individualseriesrecords (timestamp, mseries, dseries, cseries) VALUES (NOW(), ${mSeries},${dSeries},${cSeries})`).catch(error=>console.error("ERROr"+error))
+        let mIncrement,dIncrement,cIncrement
+        pool.query(
+            "SELECT * FROM individualseriesrecords ORDER BY idindividualrecord DESC LIMIT 1"
+            ).then(response=>{
+                if(response.rows[0])
+                    {
+                        previousIndividual=response.rows[0]
+                        mIncrement=mSeries-previousIndividual.mseries
+                        dIncrement=dSeries-previousIndividual.dseries
+                        cIncrement=cSeries-previousIndividual.cseries
+                        pool.query(`INSERT INTO seriesincrements (timestamp, mincrement, dIncrement, cIncrement) VALUES (NOW(), ${mIncrement},${dIncrement},${cIncrement})`).catch(error=>console.error("ERROr"+error))
+                        if(mIncrement!=dIncrement||mIncrement!=cIncrement||dIncrement!=cIncrement)
+                        {
+                            let highestIncrement=Math.max(mIncrement,dIncrement,cIncrement)
+                            let incrementAlert=" "
+                            if(highestIncrement>mIncrement)
+                                incrementAlert+="Machine counter failed to count-"
+                            if(highestIncrement>dIncrement)
+                                incrementAlert+="Digital counter failed to count-"
+                            if(highestIncrement>cIncrement)
+                                incrementAlert+="Chip counter failed to count-"
+                            pool.query(`INSERT INTO alertnotifs(notif,timestamp) VALUES (${incrementAlert},NOW())`)
+                        }
                     }
-        ).catch((error)=>console.error("error retrieving data: " + error));       
-	    
-});
+                else
+                    console.log("no")
+            }).catch(error=>console.log("ERRRRor "+ error))
+        var seriesNoNew=Math.max(mSeries,dSeries,cSeries)
+        pool.query(
+        "SELECT * FROM datatable WHERE daterecord = CURRENT_DATE"
+        ).then(response=>{console.log(response.rows[0].seriesnum)
+            seriesNo=response.rows[0].seriesnum
+            
+                
+                if(!seriesNo)
+                console.log("asdsad")
+                additionals=Math.max(seriesNoNew-seriesNo,0)
+                
+                console.log("Series No:" + seriesNoNew)
+                console.log(additionals + " new\n\n")
+                if(additionals>0){
+                    seriesNo=seriesNoNew
+                    pool.query(
+                        `UPDATE datatable SET customer = customer + ${additionals}, seriesnum =${seriesNo} where daterecord = CURRENT_DATE`
+                    );           
+                                    }
+                        }
+            ).catch((error)=>console.error("error retrieving data: " + error));  }
+    else if(topic=="turnstile-alarm")
+    {
+        console.log("ALARM TRIGGERED")
+        pool.query("INSERT INTO alertnotifs(notif, timestamp) VALUES('ALARM TRIGGERED', NOW())").catch(error=>console.log(error))
+    }  
+})
+var checkSeries = schedule.scheduleJob('*/5 * * * *', function(){    
+    client.publish("turnstile-retrieve-data","3144");
+    console.log("sent: 3144 " + Date());      
+})
 
- 
-var checkSeries = schedule.scheduleJob('*/5 * * * *', function(){
+
+
+
+
+
+/*var checkSeries = schedule.scheduleJob('*//*5 * * * *', function(){
     wss.clients.forEach(function each(client) {
 try{
       if (client.readyState === WebSocket.OPEN) {
@@ -69,7 +124,7 @@ console.log("eRRoR ::"+error)
 });
 
 
-})
+})*/
 
 //test functions
 app.get("/", async (req, res)=>{res.send(":)")});
@@ -147,7 +202,7 @@ app.delete("/account", authenticateAdmin, async (req, res) => {
     }
 });
 app.listen(5500, () => {
-    console.log("server start port 5500");
+    console.log("express server start port 5500");
 });
 
 
@@ -247,17 +302,24 @@ var rule= new schedule.RecurrenceRule();
 rule.hour=6;
 rule.minute=0;
 var dailies = schedule.scheduleJob(rule, function(){
-
+    console.log(moment().format('YYYY-MM-DD'))
     let newRec=0;
 	    pool.query(
-        "SELECT * FROM datatable WHERE daterecord = CURRENT_DATE-1"
+        "SELECT * FROM datatable ORDER BY daterecord DESC LIMIT 1"
     ).then((result)=>{
-	
+        
         newRec=result.rows[0].seriesnum
-        pool.query(
-            `INSERT INTO datatable (customer,daterecord,seriesnum) VALUES(0, CURRENT_DATE, ${newRec}) RETURNING *`
-        );
-	console.log("added new entry on " + Date())
-    }).catch(error=>console.log("eRRor" + error))
-    
+        console.log(moment(result.rows[0].daterecord).format('YYYY-MM-DD'))
+        if(moment(result.rows[0].daterecord).format('YYYY-MM-DD')!=moment().format('YYYY-MM-DD'))
+        {
+            pool.query(
+                `INSERT INTO datatable (customer,daterecord,seriesnum) VALUES(0, CURRENT_DATE, ${newRec}) RETURNING *`
+            ).catch(error=>console.log(error));
+            console.log("added new entry on " + Date())
+        }
+        else
+            console.log("record exists")
+    }).catch(error=>console.log("eRRor" + error))    
   });
+
+
